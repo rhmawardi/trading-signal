@@ -1104,7 +1104,7 @@ async function fetchFearGreed() {
       fngValue = parseInt(data.data[0].value);
       fngClass = data.data[0].value_classification.toUpperCase();
       
-      const fngColor = fngValue > 60 ? 'var(--green)' : fngValue < 40 ? 'var(--red)' : 'var(--gold)';
+      const fngColor = fngValue > 60 ? 'var(--red)' : fngValue < 40 ? 'var(--green)' : 'var(--gold)';
       document.getElementById('fgi').innerHTML = `<span style="color:${fngColor}">${fngValue} (${fngClass})</span>`;
     }
   } catch (e) {
@@ -2384,7 +2384,7 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 document.querySelectorAll('.sym-btn').forEach(btn => {
   btn.addEventListener('click', async () => {
     const selectedSym = btn.getAttribute('data-sym');
-    if (selectedSym === currentSymbol) return;
+    if (!selectedSym || selectedSym === currentSymbol) return;
     
     // Toggle active classes
     document.querySelectorAll('.sym-btn').forEach(b => b.classList.remove('active'));
@@ -2459,7 +2459,18 @@ function requestNotificationPermission() {
 
 function sendPushNotification(title, body) {
   if ("Notification" in window && Notification.permission === "granted") {
-    new Notification(title, { body: body });
+    if (navigator.serviceWorker) {
+      navigator.serviceWorker.ready.then(function(registration) {
+        registration.showNotification(title, {
+          body: body,
+          icon: 'icon-192.png',
+          badge: 'icon-192.png',
+          vibrate: [200, 100, 200]
+        });
+      });
+    } else {
+      new Notification(title, { body: body, icon: 'icon-192.png' });
+    }
   }
 }
 
