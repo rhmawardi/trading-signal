@@ -713,7 +713,7 @@
       <div class="fs-lbl">Short Ratio</div>
     </div>
     <div class="fs-item">
-      <div class="fs-val" id="fear">--</div>
+      <div class="fs-val" id="btcDominance">--</div>
       <div class="fs-lbl">Dominasi BTC</div>
     </div>
     <div class="fs-item">
@@ -1109,6 +1109,19 @@ async function fetchFearGreed() {
     }
   } catch (e) {
     console.error('fetchFearGreed error:', e);
+  }
+}
+
+async function fetchBtcDominance() {
+  try {
+    const d = await fetchData('btcDominance', 'https://api.coinmarketcap.com/data-api/v3/global-metrics/quotes/latest');
+    if (d && d.data && d.data.btcDominance) {
+      const dom = parseFloat(d.data.btcDominance).toFixed(2);
+      const el = document.getElementById('btcDominance');
+      if (el) el.textContent = dom + '%';
+    }
+  } catch (e) {
+    console.error('fetchBtcDominance error:', e);
   }
 }
 
@@ -2431,6 +2444,7 @@ async function refresh(){
 
 async function fullRefresh(){
   await fetchFearGreed();
+  await fetchBtcDominance();
   await fetchKlines();
   await refresh();
 }
