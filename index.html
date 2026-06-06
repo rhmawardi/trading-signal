@@ -663,9 +663,9 @@
       </div>
       
       <div class="strat-card" style="display:flex; flex-direction:column; justify-content:center; align-items:center; padding:10px">
-        <div class="strat-name">WE Ratio</div>
-        <div class="strat-sig" id="btWeRatio" style="font-size:18px; color:var(--gold)">--</div>
-        <div class="strat-score">Rasio Win/Lose</div>
+        <div class="strat-name">Total Profit</div>
+        <div class="strat-sig" id="btProfit" style="font-size:18px; color:var(--gold)">--%</div>
+        <div class="strat-score">Akumulasi Profit</div>
       </div>
     </div>
 
@@ -1112,6 +1112,22 @@ async function fetchFearGreed() {
   }
 }
 
+async function fetchLongShortRatio() {
+  try {
+    const d = await fetchData('ls_ratio', 'https://fapi.binance.com/futures/data/globalLongShortAccountRatio', { symbol: currentSymbol, period: '5m', limit: 1 });
+    if (d && d.length > 0) {
+      const data = d[0];
+      const longAccount = parseFloat(data.longAccount);
+      const shortAccount = parseFloat(data.shortAccount);
+      
+      document.getElementById('longRatio').textContent = (longAccount * 100).toFixed(1) + '%';
+      document.getElementById('shortRatio').textContent = (shortAccount * 100).toFixed(1) + '%';
+    }
+  } catch (e) {
+    console.error('fetchLongShortRatio error:', e);
+  }
+}
+
 
 function initWebSocket() {
   if (ws) {
@@ -1391,17 +1407,79 @@ function detectDivergence(candles, rsiArr) {
     const lastLow = lows[lows.length - 1];
     const prevLow = lows[lows.length - 2];
     if (lastLow.price < prevLow.price && lastLow.rsi > prevLow.rsi) {
-      if (lookback - lastLow.idx <= 15) return 'BULLISH_DIV';
+      let valid = true;
+      for (let j = lastLow.idx + 1; j < recentCandles.length; j++) {
+        if (recentCandles[j].l < lastLow.price) valid = false; // Invalidated jika jebol
+      }
+      if (valid && (lookback - lastLow.idx <= 15)) return 'BULLISH_DIV';
     }
   }
   if (highs.length >= 2) {
     const lastHigh = highs[highs.length - 1];
     const prevHigh = highs[highs.length - 2];
     if (lastHigh.price > prevHigh.price && lastHigh.rsi < prevHigh.rsi) {
-      if (lookback - lastHigh.idx <= 15) return 'BEARISH_DIV';
+      let valid = true;
+      for (let j = lastHigh.idx + 1; j < recentCandles.length; j++) {
+        if (recentCandles[j].h > lastHigh.price) valid = false; // Invalidated jika jebol
+      }
+      if (valid && (lookback - lastHigh.idx <= 15)) return 'BEARISH_DIV';
     }
   }
   return 'NONE';
+}
+
+function detectOrderBlocks(candles, lookback = 60) {
+  if (!candles || candles.length < lookback) return { bullish: null, bearish: null };
+  const recent = candles.slice(-lookback);
+  let bullishOBs = [];
+  let bearishOBs = [];
+  let totalBody = 0;
+  for(let i=0; i<recent.length; i++) {
+    totalBody += Math.abs(recent[i].c - recent[i].o);
+  }
+  const avgBody = totalBody / recent.length;
+  
+  for (let i = 1; i < recent.length - 3; i++) {
+    const c1 = recent[i];
+    if (c1.c < c1.o) {
+      const move1 = recent[i+1].c - recent[i+1].o;
+      const move2 = recent[i+2].c - recent[i+2].o;
+      if (move1 > 0 && (move1 + (move2 > 0 ? move2 : 0)) > avgBody * 2.5) {
+        if (recent[i+1].c > c1.h || recent[i+2].c > c1.h) {
+          bullishOBs.push({ top: c1.h, bottom: c1.l, time: c1.t, active: true });
+        }
+      }
+    }
+    if (c1.c > c1.o) {
+      const move1 = recent[i+1].o - recent[i+1].c;
+      const move2 = recent[i+2].o - recent[i+2].c;
+      if (move1 > 0 && (move1 + (move2 > 0 ? move2 : 0)) > avgBody * 2.5) {
+        if (recent[i+1].c < c1.l || recent[i+2].c < c1.l) {
+          bearishOBs.push({ top: c1.h, bottom: c1.l, time: c1.t, active: true });
+        }
+      }
+    }
+  }
+  
+  bullishOBs.forEach(ob => {
+    for (let i = recent.findIndex(c => c.t === ob.time) + 1; i < recent.length; i++) {
+      if (recent[i].c < ob.bottom) ob.active = false;
+    }
+  });
+  
+  bearishOBs.forEach(ob => {
+    for (let i = recent.findIndex(c => c.t === ob.time) + 1; i < recent.length; i++) {
+      if (recent[i].c > ob.top) ob.active = false;
+    }
+  });
+  
+  const activeBullish = bullishOBs.filter(ob => ob.active);
+  const activeBearish = bearishOBs.filter(ob => ob.active);
+  
+  return {
+    bullish: activeBullish.length > 0 ? activeBullish[activeBullish.length - 1] : null,
+    bearish: activeBearish.length > 0 ? activeBearish[activeBearish.length - 1] : null
+  };
 }
 
 function calcSignals(isCandleClosed = false){
@@ -1558,41 +1636,77 @@ function calcSignals(isCandleClosed = false){
   }
 
   // Calculate live indicator-based strategy signals with ADX Filter and VWMA Confirmation
-  let score=0,total=0;
   const vwma20 = calcVWMA(priceHistory, 20);
-  const vwapBullish = price > vwma20;
   
-  if (adxV > 25) {
-    // TREN KUAT (ADX > 25): Fokus ke indikator Tren & Volume, kurangi bobot Osilator
-    if(macd.hist>0){score+=3;total+=3}else{score-=3;total+=3}
-    if(emaPos){score+=3;total+=3}else{score-=3;total+=3}
-    if(vwapBullish){score+=2;total+=2}else{score-=2;total+=2}
-    if(rsi<40){score+=1;total+=1}else if(rsi>60){score-=1;total+=1}else{total+=1}
-    if(stoch<20){score+=1;total+=1}else if(stoch>80){score-=1;total+=1}else{total+=1}
-  } else if (adxV < 20) {
-    // SIDEWAYS/RANGING (ADX < 20): Fokus ke Osilator, kurangi bobot Tren
-    if(price<bb.lower){score+=3;total+=3}else if(price>bb.upper){score-=3;total+=3}else{total+=2}
-    if(rsi<35){score+=3;total+=3}else if(rsi>65){score-=3;total+=3}else{total+=2}
-    if(stoch<20){score+=2;total+=2}else if(stoch>80){score-=2;total+=2}else{total+=1}
-    if(macd.hist>0){score+=1;total+=1}else{score-=1;total+=1}
-    if(vwapBullish){score+=1;total+=1}else{score-=1;total+=1}
+  const trendBullish = ema20 > ema50 && ema50 > ema200;
+  const trendBearish = ema20 < ema50 && ema50 < ema200;
+  
+  let rawScore = 50; 
+  
+  if (trendBullish) rawScore += 20;
+  else if (trendBearish) rawScore -= 20;
+  else {
+    if (price > ema200) rawScore += 5; else rawScore -= 5;
+    if (ema20 > ema50) rawScore += 5; else rawScore -= 5;
+  }
+  
+  if (price > vwma20) rawScore += 10;
+  else rawScore -= 10;
+  
+  // MACD Momentum Filter
+  const prevMacd = calcMACD(closes.slice(0, closes.length - 1));
+  const macdMomentumUp = macd.hist > prevMacd.hist;
+  
+  if (macd.hist > 0) {
+    if (macdMomentumUp) rawScore += 15;
+    else rawScore += 5; // Momentum melemah
   } else {
-    // NORMAL/TRANSISI: Bobot seimbang
-    if(rsi<35){score+=2;total+=2}else if(rsi>65){score-=2;total+=2}else{total+=1}
-    if(macd.hist>0){score+=2;total+=2}else{score-=2;total+=2}
-    if(emaPos){score+=2;total+=2}else{score-=2;total+=2}
-    if(price<bb.lower){score+=1;total+=1}else if(price>bb.upper){score-=1;total+=1}else{total+=1}
-    if(stoch<25){score+=1;total+=1}else if(stoch>75){score-=1;total+=1}else{total+=1}
-    if(vwapBullish){score+=1.5;total+=1.5}else{score-=1.5;total+=1.5}
+    if (!macdMomentumUp) rawScore -= 15;
+    else rawScore -= 5; // Momentum negatif melemah
+  }
+  
+  // Bollinger Bands Mean-Reversion Filter
+  if (price > bb.upper) rawScore -= 15; // Overextended, rawan pullback
+  else if (price < bb.lower) rawScore += 15; // Oversold, rawan bounce
+
+  if (rsi > 55 && rsi < 70) rawScore += 10; 
+  else if (rsi < 45 && rsi > 30) rawScore -= 10;
+  else if (rsi >= 75) rawScore -= 15; // Extreme overbought trap prevention
+  else if (rsi <= 25) rawScore += 15; // Extreme oversold trap prevention
+  
+  if (stoch > 20 && stoch < 80) {
+    if (macd.hist > 0) rawScore += 5;
+    else rawScore -= 5;
+  } else if (stoch >= 80) {
+    rawScore -= 5; // Exhaustion
+  } else if (stoch <= 20) {
+    rawScore += 5; // Exhaustion
+  }
+  
+  // ADX Filter
+  if (adxV < 20) {
+    rawScore = 50 + ((rawScore - 50) * 0.3); // Sideways compression
+  } else if (adxV >= 20 && adxV < 25) {
+    rawScore = 50 + ((rawScore - 50) * 0.8);
+  } else {
+    rawScore = 50 + ((rawScore - 50) * 1.2); // Trend boost
   }
 
-  const norm=(score+total)/(2*total);
-  const pct=Math.round(norm*100);
-  let liveSig='NEUTRAL', liveConf=0;
+  // Divergence Booster
+  if (currentDivergence === 'BULLISH_DIV') rawScore += 20;
+  else if (currentDivergence === 'BEARISH_DIV') rawScore -= 20;
 
-  if(pct>=65){liveSig='LONG';liveConf=70+Math.round((pct-65)*0.8)}
-  else if(pct<=35){liveSig='SHORT';liveConf=70+Math.round((35-pct)*0.8)}
-  else{liveConf=55+Math.round(Math.abs(pct-50)*0.4)}
+  // Order Block Booster
+  const obs = detectOrderBlocks(priceHistory, 60);
+  if (obs.bullish && price >= obs.bullish.bottom && price <= (obs.bullish.top * 1.002)) rawScore += 20;
+  if (obs.bearish && price <= obs.bearish.top && price >= (obs.bearish.bottom * 0.998)) rawScore -= 20;
+  
+  const pct = Math.max(0, Math.min(100, Math.round(rawScore)));
+  let liveSig = 'NEUTRAL', liveConf = 0;
+  
+  if(pct >= 72){ liveSig = 'LONG'; liveConf = pct; }
+  else if(pct <= 28){ liveSig = 'SHORT'; liveConf = 100 - pct; }
+  else { liveConf = 55 + Math.round(Math.abs(pct - 50) * 0.4); }
   
   // MTF Filtering
   if (liveSig === 'LONG' && mtfTrend === 'BEARISH') {
@@ -1605,24 +1719,6 @@ function calcSignals(isCandleClosed = false){
     liveConf += 10;
   }
   
-  // Divergence Booster
-  if (currentDivergence === 'BULLISH_DIV') {
-    if (liveSig !== 'SHORT') {
-      liveSig = 'LONG';
-      liveConf += 20;
-    } else {
-      liveSig = 'NEUTRAL';
-    }
-  } else if (currentDivergence === 'BEARISH_DIV') {
-    if (liveSig !== 'LONG') {
-      liveSig = 'SHORT';
-      liveConf += 20;
-    } else {
-      liveSig = 'NEUTRAL';
-    }
-  }
-
-  // Institutional Boosters
   // Institutional Boosters
   if (liveSig === 'LONG') {
     if (obImbalance > 1.5) liveConf += 10; // Order book favors buyers
@@ -1677,15 +1773,14 @@ function calcSignals(isCandleClosed = false){
 
   // If there is no active trade and a strategy signal triggers, check if we can enter
   if (!activeTrade && (liveSig === 'LONG' || liveSig === 'SHORT')) {
-    // LOCK ON CLOSE ONLY: Prevent intra-candle repainting traps
-    if (isCandleClosed) {
-      const currentCandleTime = priceHistory[priceHistory.length - 1].t;
+    // Kunci langsung tanpa menunggu isCandleClosed agar user mendapat sinyal real-time
+    const currentCandleTime = priceHistory[priceHistory.length - 1].t;
     const lastResolved = lastResolvedCandleTimes[tradeKey] || 0;
     
     if (currentCandleTime > lastResolved) {
       // Calculate targets
       if (liveSig === 'LONG') {
-        slVal = price - (1.5 * atr);
+        slVal = price - (2.0 * atr);
         tp1Val = price + (1.5 * atr);
         tp2Val = price + (3.0 * atr);
         if (!atr || atr <= 0) {
@@ -1694,7 +1789,7 @@ function calcSignals(isCandleClosed = false){
           tp2Val = price * 1.03;
         }
       } else {
-        slVal = price + (1.5 * atr);
+        slVal = price + (2.0 * atr);
         tp1Val = price - (1.5 * atr);
         tp2Val = price - (3.0 * atr);
         if (!atr || atr <= 0) {
@@ -1720,7 +1815,6 @@ function calcSignals(isCandleClosed = false){
       
       showToast(`Posisi ${liveSig} Baru Terbuka pada harga $${fmtP(price)}`, 'info');
       sendPushNotification(`Posisi ${liveSig} Terkunci!`, `Harga Entry: $${fmtP(price)} pada ${currentSymbol}`);
-    }
     }
   }
 
@@ -1770,7 +1864,7 @@ function calcSignals(isCandleClosed = false){
     document.getElementById('sigStrength').textContent = sig === 'LONG' ? 'BULLISH KUAT' : sig === 'SHORT' ? 'BEARISH KUAT' : 'KONSOLIDASI';
 
     if (sig === 'LONG') {
-      slVal = entryPrice - (1.5 * atr);
+      slVal = entryPrice - (2.0 * atr);
       tp1Val = entryPrice + (1.5 * atr);
       tp2Val = entryPrice + (3.0 * atr);
       if (!atr || atr <= 0) {
@@ -1787,7 +1881,7 @@ function calcSignals(isCandleClosed = false){
       document.getElementById('tp2').textContent = '$' + fmtP(tp2Val) + ` (+${tp2Pct}%)`;
       document.getElementById('sl1').textContent = '$' + fmtP(slVal) + ` (-${slPct}%)`;
     } else if (sig === 'SHORT') {
-      slVal = entryPrice + (1.5 * atr);
+      slVal = entryPrice + (2.0 * atr);
       tp1Val = entryPrice - (1.5 * atr);
       tp2Val = entryPrice - (3.0 * atr);
       if (!atr || atr <= 0) {
@@ -1850,10 +1944,7 @@ function calcSignals(isCandleClosed = false){
   tb.className='badge '+(emaPos?'badge-green':'badge-red');
 
   // Footer stats
-  const longR=Math.round(norm*100);
-  document.getElementById('longRatio').textContent=longR+'%';
-  document.getElementById('shortRatio').textContent=(100-longR)+'%';
-  document.getElementById('fear').textContent='54.2%';
+  // Note: longRatio, shortRatio, and fear are updated in real-time via fetchRealtimeSentiment()
   document.getElementById('signal24').textContent=sig==='LONG'?'📈 LONG':sig==='SHORT'?'📉 SHORT':'⏸ WAIT';
 
   // Run and update backtest metrics
@@ -1866,6 +1957,7 @@ function runBacktest() {
   let totalTrades = 0;
   let wins = 0;
   let losses = 0;
+  let totalProfitPct = 0;
   let simulatedTrades = [];
   
   let i = 50; // Start at 50 to allow indicators to warm up
@@ -1873,7 +1965,8 @@ function runBacktest() {
     const historicalCloses = closes.slice(0, i + 1);
     
     // Calculate indicators at index i
-    const rsi = calcRSI(historicalCloses);
+    const rsiArr = getRSIArray(historicalCloses);
+    const rsi = rsiArr[rsiArr.length - 1];
     const macd = calcMACD(historicalCloses);
     const ema20 = calcEMA(historicalCloses, 20);
     const ema50 = calcEMA(historicalCloses, 50);
@@ -1882,22 +1975,101 @@ function runBacktest() {
     const bb = calcBB(historicalCloses);
     const price = historicalCloses[historicalCloses.length - 1];
     
-    // Combined signal score calculation (mirroring the main dashboard strategy)
-    let score = 0, total = 0;
-    if (rsi < 35) { score += 2; total += 2; } else if (rsi > 65) { score -= 2; total += 2; } else { total += 1; }
-    if (macd.hist > 0) { score += 2; total += 2; } else { score -= 2; total += 2; }
+    const historicalHistory = priceHistory.slice(0, i + 1);
+    const vwma20 = calcVWMA(historicalHistory, 20);
+    const vwapBullish = price > vwma20;
+    const adxV = calcADX(historicalHistory, 14);
     const emaPos = price > ema20 && ema20 > ema50;
-    if (emaPos) { score += 2; total += 2; } else { score -= 2; total += 2; }
-    if (price < bb.lower) { score += 1; total += 1; } else if (price > bb.upper) { score -= 1; total += 1; } else { total += 1; }
-    if (stoch < 25) { score += 1; total += 1; } else if (stoch > 75) { score -= 1; total += 1; } else { total += 1; }
     
-    const norm = (score + total) / (2 * total);
-    const pct = Math.round(norm * 100);
+    const trendBullish = ema20 > ema50 && ema50 > ema200;
+    const trendBearish = ema20 < ema50 && ema50 < ema200;
     
-    let sig = 'NEUTRAL';
-    if (pct >= 65) sig = 'LONG';
-    else if (pct <= 35) sig = 'SHORT';
+    let rawScore = 50; 
     
+    if (trendBullish) rawScore += 20;
+    else if (trendBearish) rawScore -= 20;
+    else {
+      if (price > ema200) rawScore += 5; else rawScore -= 5;
+      if (ema20 > ema50) rawScore += 5; else rawScore -= 5;
+    }
+    
+    if (price > vwma20) rawScore += 10;
+    else rawScore -= 10;
+    
+    const prevMacd = calcMACD(historicalCloses.slice(0, -1));
+    const macdMomentumUp = macd.hist > prevMacd.hist;
+    
+    if (macd.hist > 0) {
+      if (macdMomentumUp) rawScore += 15;
+      else rawScore += 5;
+    } else {
+      if (!macdMomentumUp) rawScore -= 15;
+      else rawScore -= 5;
+    }
+
+    if (price > bb.upper) rawScore -= 15;
+    else if (price < bb.lower) rawScore += 15;
+    
+    if (rsi > 55 && rsi < 70) rawScore += 10; 
+    else if (rsi < 45 && rsi > 30) rawScore -= 10;
+    else if (rsi >= 75) rawScore -= 15; // Extreme overbought trap prevention
+    else if (rsi <= 25) rawScore += 15; // Extreme oversold trap prevention
+    
+    if (stoch > 20 && stoch < 80) {
+      if (macd.hist > 0) rawScore += 5;
+      else rawScore -= 5;
+    } else if (stoch >= 80) {
+      rawScore -= 5; // Exhaustion
+    } else if (stoch <= 20) {
+      rawScore += 5; // Exhaustion
+    }
+    
+    // ADX Filter
+    if (adxV < 20) {
+      rawScore = 50 + ((rawScore - 50) * 0.3); // Sideways compression
+    } else if (adxV >= 20 && adxV < 25) {
+      rawScore = 50 + ((rawScore - 50) * 0.8);
+    } else {
+      rawScore = 50 + ((rawScore - 50) * 1.2); // Trend boost
+    }
+
+    const currentDivergence = detectDivergence(historicalHistory, rsiArr);
+    if (currentDivergence === 'BULLISH_DIV') rawScore += 20;
+    else if (currentDivergence === 'BEARISH_DIV') rawScore -= 20;
+
+    const obs = detectOrderBlocks(historicalHistory, 60);
+    if (obs.bullish && price >= obs.bullish.bottom && price <= (obs.bullish.top * 1.002)) rawScore += 20;
+    if (obs.bearish && price <= obs.bearish.top && price >= (obs.bearish.bottom * 0.998)) rawScore -= 20;
+    
+    const pct = Math.max(0, Math.min(100, Math.round(rawScore)));
+    let sig = 'NEUTRAL', liveConf = 0;
+    
+    if(pct >= 72){ sig = 'LONG'; liveConf = pct; }
+    else if(pct <= 28){ sig = 'SHORT'; liveConf = 100 - pct; }
+    else { liveConf = 55 + Math.round(Math.abs(pct - 50) * 0.4); }
+    
+    // MTF Approximation yang lebih akurat
+    const mtfTrend = ema50 > ema200 ? 'BULLISH' : 'BEARISH';
+    if (sig === 'LONG' && mtfTrend === 'BEARISH') {
+      liveConf -= 15;
+      if (liveConf < 65) sig = 'NEUTRAL';
+    } else if (sig === 'SHORT' && mtfTrend === 'BULLISH') {
+      liveConf -= 15;
+      if (liveConf < 65) sig = 'NEUTRAL';
+    } else if ((sig === 'LONG' && mtfTrend === 'BULLISH') || (sig === 'SHORT' && mtfTrend === 'BEARISH')) {
+      liveConf += 10;
+    }
+
+    // Volume Anomaly in Backtest
+    const historicalVolumes = volumes.slice(0, i + 1);
+    const lastClosedVol = historicalVolumes[historicalVolumes.length - 2];
+    const prevClosedVolumes = historicalVolumes.slice(-22, -2);
+    const avgVol = prevClosedVolumes.reduce((a, b) => a + b, 0) / (prevClosedVolumes.length || 1);
+    const btVolAnomaly = lastClosedVol > (avgVol * 2.0);
+
+    if (sig === 'LONG' && btVolAnomaly) liveConf += 10;
+    if (sig === 'SHORT' && btVolAnomaly) liveConf += 10;
+
     if (sig !== 'NEUTRAL') {
       const entryPrice = price;
       // Extract historical slice to calculate ATR at the point of trade entry
@@ -1907,7 +2079,7 @@ function runBacktest() {
       if (sig === 'LONG') {
         tp1Val = entryPrice + (1.5 * atr);
         tp2Val = entryPrice + (3.0 * atr);
-        slVal = entryPrice - (1.5 * atr);
+        slVal = entryPrice - (2.0 * atr);
         if (!atr || atr <= 0) {
           tp1Val = entryPrice * 1.015;
           tp2Val = entryPrice * 1.03;
@@ -1916,7 +2088,7 @@ function runBacktest() {
       } else {
         tp1Val = entryPrice - (1.5 * atr);
         tp2Val = entryPrice - (3.0 * atr);
-        slVal = entryPrice + (1.5 * atr);
+        slVal = entryPrice + (2.0 * atr);
         if (!atr || atr <= 0) {
           tp1Val = entryPrice * 0.985;
           tp2Val = entryPrice * 0.97;
@@ -2048,27 +2220,57 @@ function runBacktest() {
       }
       
       let pnlPct = 0;
+      const leverage = 10; // Asumsi 10x leverage untuk Futures
+      
       if (sig === 'LONG') {
-        pnlPct = ((exitPrice - entryPrice) / entryPrice) * 100;
+        if (tp1Hit) {
+          if (exitPrice === tp2Val) {
+            // Hit TP1 lalu TP2 (50% TP1, 50% TP2)
+            pnlPct = (((tp1Val - entryPrice) / entryPrice) * 0.5 + ((tp2Val - entryPrice) / entryPrice) * 0.5) * 100;
+          } else {
+            // Hit TP1 lalu kena Break-Even (50% TP1, 50% BE)
+            pnlPct = (((tp1Val - entryPrice) / entryPrice) * 0.5) * 100;
+          }
+        } else {
+          // Kena SL awal (100% loss di SL)
+          pnlPct = ((exitPrice - entryPrice) / entryPrice) * 100;
+        }
       } else {
-        pnlPct = ((entryPrice - exitPrice) / entryPrice) * 100;
+        if (tp1Hit) {
+          if (exitPrice === tp2Val) {
+            // Hit TP1 lalu TP2
+            pnlPct = (((entryPrice - tp1Val) / entryPrice) * 0.5 + ((entryPrice - tp2Val) / entryPrice) * 0.5) * 100;
+          } else {
+            // Hit TP1 lalu kena Break-Even
+            pnlPct = (((entryPrice - tp1Val) / entryPrice) * 0.5) * 100;
+          }
+        } else {
+          // Kena SL awal
+          pnlPct = ((entryPrice - exitPrice) / entryPrice) * 100;
+        }
       }
       
-      totalTrades++;
-      if (status === 'WIN') wins++;
-      else losses++;
-      
-      simulatedTrades.push({
-        time: priceHistory[i].t,
-        type: sig,
-        entry: entryPrice,
-        tp1: tp1Val,
-        tp2: tp2Val,
-        sl: slVal,
-        exit: exitPrice,
-        pnl: pnlPct,
-        status: status
-      });
+      pnlPct *= leverage;
+
+      // Simpan semua trade yang selesai (termasuk yang BE/TP1)
+      if (status !== 'OPEN') {
+        totalProfitPct += pnlPct;
+        totalTrades++;
+        if (status === 'WIN') wins++;
+        else losses++;
+        
+        simulatedTrades.push({
+          time: priceHistory[i].t,
+          type: sig,
+          entry: entryPrice,
+          tp1: tp1Val,
+          tp2: tp2Val,
+          sl: slVal,
+          exit: exitPrice,
+          pnl: pnlPct,
+          status: status
+        });
+      }
       
       // Fast-forward to index of resolution (simulate one holding period at a time)
       i = resolvedIndex;
@@ -2086,6 +2288,7 @@ function runBacktest() {
     wins: wins,
     losses: losses,
     weRatio: weRatio,
+    totalProfitPct: totalProfitPct,
     trades: simulatedTrades
   };
 }
@@ -2109,10 +2312,11 @@ function updateBacktestUI() {
   const btWinLose = document.getElementById('btWinLose');
   if (btWinLose) btWinLose.textContent = `${result.wins} W / ${result.losses} L`;
   
-  const btWeRatio = document.getElementById('btWeRatio');
-  if (btWeRatio) {
-    btWeRatio.textContent = result.weRatio.toFixed(2);
-    btWeRatio.style.color = result.weRatio >= 1.5 ? 'var(--green)' : result.weRatio >= 1.0 ? 'var(--gold)' : 'var(--red)';
+  const btProfit = document.getElementById('btProfit');
+  if (btProfit) {
+    const sign = result.totalProfitPct > 0 ? '+' : '';
+    btProfit.textContent = sign + result.totalProfitPct.toFixed(2) + '%';
+    btProfit.style.color = result.totalProfitPct > 0 ? 'var(--green)' : result.totalProfitPct < 0 ? 'var(--red)' : 'var(--muted)';
   }
   
   const btTradeCount = document.getElementById('btTradeCount');
@@ -2216,6 +2420,7 @@ async function refresh(){
     await fetchTicker();
     await fetchOrderBook();
     await fetchFunding();
+    await fetchLongShortRatio();
     updateTicker();
   } catch (e) {
     console.error("Kesalahan saat menyegarkan data:", e);
