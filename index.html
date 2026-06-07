@@ -1797,8 +1797,8 @@ function calcSignals(isCandleClosed = false){
   const atr = calcATR(priceHistory, 14);
 
   // If there is no active trade and a strategy signal triggers, check if we can enter
-  if (!activeTrade && (liveSig === 'LONG' || liveSig === 'SHORT')) {
-    // Kunci langsung tanpa menunggu isCandleClosed agar user mendapat sinyal real-time
+  // FIX: Hanya eksekusi sinyal jika candle sudah ditutup (isCandleClosed === true) untuk menghindari false signal/whipsaw
+  if (!activeTrade && isCandleClosed && (liveSig === 'LONG' || liveSig === 'SHORT')) {
     const currentCandleTime = priceHistory[priceHistory.length - 1].t;
     const lastResolved = lastResolvedCandleTimes[tradeKey] || 0;
     
