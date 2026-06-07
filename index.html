@@ -1847,8 +1847,8 @@ function calcSignals(isCandleClosed = false){
     banner.className = 'signal-banner ' + sig;
     sigEl.textContent = sig + ' (AKTIF)';
     sigEl.className = 'sig-label ' + sig;
-    confEl.textContent = activeTrade.tp1Hit ? 'BE-LOCK' : 'TERKUNCI';
-    confEl.className = 'hi';
+    confEl.textContent = conf + '%';
+    confEl.className = conf >= 75 ? 'hi' : conf >= 65 ? 'mid' : 'lo';
     document.getElementById('sigStrength').textContent = activeTrade.tp1Hit ? 'TARGET 1 DICAPAI (STOP LOSS DI ENTRY)' : 'POSISI TERKUNCI (MENUNGGU TP1/SL)';
 
     // Update targets with locked values and dynamic percentages
